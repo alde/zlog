@@ -18,6 +18,11 @@ pub fn main() !void {
     // Error values — no manual @errorName() needed
     req_log.err("db query failed", .{ .err = error.ConnectionRefused, .retries = 3 });
 
+    // Runtime values in attrs — variables resolved at runtime, not just comptime literals
+    var status: u16 = 200;
+    status += 0;
+    req_log.info("response sent", .{ .status = status, .path = "/api/users" });
+
     // Runtime fields — dynamic keys from Field constructors
     const fields = &[_]zlog.Field{
         zlog.Field.string("trace_id", "xyz-789"),
