@@ -76,9 +76,10 @@ pub fn Logger(comptime min_level: Level, comptime opts: Options) type {
         /// the root's arena — do NOT call `deinit()` on children.
         /// Panics on arena OOM (should never happen in practice).
         pub fn with(self: Self, attrs: anytype) Self {
-            const extra = field_conversion.fieldsFromStruct(attrs);
+            const arena = self.shared.arena.allocator();
+            const extra = field_conversion.fieldsFromStruct(arena, attrs);
             if (extra.len == 0) return self;
-            return self.addFields(extra);
+            return self.addFields(&extra);
         }
 
         /// Creates a child logger with runtime field slices. The child shares
@@ -239,7 +240,12 @@ pub fn Logger(comptime min_level: Level, comptime opts: Options) type {
                 if (@intFromEnum(level) < @intFromEnum(runtime_level.load())) return;
             }
 
-            const raw_call_fields = field_conversion.fieldsFromStruct(attrs);
+            // Stack FBA used for field conversion (nested structs) and merge/wrap.
+            var stack_buf: [8192]u8 = undefined;
+            var stack_fba = std.heap.FixedBufferAllocator.init(&stack_buf);
+            const stack_alloc = stack_fba.allocator();
+
+            const raw_call_fields = field_conversion.fieldsFromStruct(stack_alloc, attrs);
 
             // Fast path: no merge, no group wrapping, no middleware — skip arena entirely
             if (self.base_fields.len == 0 and self.group_fields.len == 0 and self.group_prefix.len == 0 and self.middlewares.len == 0) {
@@ -247,24 +253,21 @@ pub fn Logger(comptime min_level: Level, comptime opts: Options) type {
                     .level = level,
                     .message = msg,
                     .timestamp_ns = std.time.nanoTimestamp(),
-                    .fields = raw_call_fields,
+                    .fields = &raw_call_fields,
                     .src = src,
                 };
                 self.handler.emit(&record);
                 return;
             }
 
-            // Slow path: merge/wrap fields on a stack FBA to avoid heap allocation.
-            var stack_buf: [8192]u8 = undefined;
-            var stack_fba = std.heap.FixedBufferAllocator.init(&stack_buf);
-            const merge_alloc = stack_fba.allocator();
+            const merge_alloc = stack_alloc;
 
             // Merge group_fields (from with() under a group prefix) with call-site fields,
             // then wrap the combined set in the group prefix. This produces a single group
             // instead of duplicate sibling keys.
-            const grouped_fields = mergeFields(merge_alloc, self.group_fields, raw_call_fields) catch blk: {
+            const grouped_fields = mergeFields(merge_alloc, self.group_fields, &raw_call_fields) catch blk: {
                 fd.stderr.writeAll("zlog: group fields dropped: merge OOM\n") catch {};
-                break :blk raw_call_fields;
+                break :blk &raw_call_fields;
             };
             const call_fields = if (self.group_prefix.len > 0 and grouped_fields.len > 0)
                 wrapInGroup(merge_alloc, self.group_prefix, grouped_fields) catch |e| switch (e) {
@@ -936,4 +939,46 @@ test "isEnabled checks comptime and runtime levels" {
 
     lvl.set(.info);
     try testing.expect(logger.isEnabled(.info));
+}
+
+test "runtime values in attrs" {
+    const testing = std.testing;
+    var buf: [1024]u8 = undefined;
+    var fbs = std.io.fixedBufferStream(&buf);
+    var writer = fbs.writer();
+
+    const json = @import("handlers/json.zig");
+    var h = json.init(writer.any());
+    const Log = Logger(.debug, .{});
+    const logger = try Log.init(.{ .handler = h.handler(), .allocator = testing.allocator });
+    defer logger.deinit();
+
+    // The exact reproduction case: runtime variable in attrs
+    var result: i32 = 200;
+    result += 0;
+    logger.info("done", .{ .result = result });
+
+    const output = fbs.getWritten();
+    try testing.expect(std.mem.indexOf(u8, output, "\"result\":200") != null);
+}
+
+test "with() with runtime values" {
+    const testing = std.testing;
+    var buf: [1024]u8 = undefined;
+    var fbs = std.io.fixedBufferStream(&buf);
+    var writer = fbs.writer();
+
+    const json = @import("handlers/json.zig");
+    var h = json.init(writer.any());
+    const Log = Logger(.debug, .{});
+    const logger = try Log.init(.{ .handler = h.handler(), .allocator = testing.allocator });
+    defer logger.deinit();
+
+    var request_id: []const u8 = "req-456";
+    request_id = request_id;
+    const child = logger.with(.{ .request_id = request_id });
+    child.info("handled", .{});
+
+    const output = fbs.getWritten();
+    try testing.expect(std.mem.indexOf(u8, output, "\"request_id\":\"req-456\"") != null);
 }

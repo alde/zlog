@@ -1,7 +1,10 @@
 const std = @import("std");
 const Field = @import("Field.zig");
+const Allocator = std.mem.Allocator;
 
-pub fn toValue(comptime val: anytype) Field.Value {
+/// Converts a Zig value to a Field.Value. Works with both comptime and runtime values.
+/// The `alloc` parameter is only used for nested struct group allocation.
+pub inline fn toValue(alloc: Allocator, val: anytype) Field.Value {
     const T = @TypeOf(val);
     const info = @typeInfo(T);
 
@@ -30,12 +33,15 @@ pub fn toValue(comptime val: anytype) Field.Value {
         .float, .comptime_float => return .{ .float = @floatCast(val) },
         .optional => {
             if (val) |v| {
-                return comptime toValue(v);
+                return toValue(alloc, v);
             } else {
                 return .null_value;
             }
         },
-        .@"struct" => return .{ .group = fieldsFromStruct(val) },
+        .@"struct" => {
+            const fields = fieldsFromStruct(alloc, val);
+            return .{ .group = &fields };
+        },
         .@"enum" => return .{ .string = @tagName(val) },
         .error_set => return .{ .err_name = @errorName(val) },
         else => @compileError("unsupported field type: " ++ @typeName(T)),
@@ -59,22 +65,28 @@ fn isStringType(comptime T: type) bool {
     return false;
 }
 
-pub fn fieldsFromStruct(comptime attrs: anytype) []const Field.Field {
+fn fieldCount(comptime T: type) comptime_int {
+    return @typeInfo(T).@"struct".fields.len;
+}
+
+/// Converts an anonymous struct to a fixed-size array of Fields. Works with runtime values.
+/// Field names come from comptime type info; values can be runtime.
+pub inline fn fieldsFromStruct(alloc: Allocator, attrs: anytype) [fieldCount(@TypeOf(attrs))]Field.Field {
     const info = @typeInfo(@TypeOf(attrs)).@"struct";
-    comptime var result: [info.fields.len]Field.Field = undefined;
+    var result: [info.fields.len]Field.Field = undefined;
     inline for (info.fields, 0..) |f, i| {
         result[i] = .{
             .key = f.name,
-            .value = comptime toValue(@field(attrs, f.name)),
+            .value = toValue(alloc, @field(attrs, f.name)),
         };
     }
-    const final = result;
-    return &final;
+    return result;
 }
+
 
 test "fieldsFromStruct basic types" {
     const testing = std.testing;
-    const fields = fieldsFromStruct(.{
+    const fields = fieldsFromStruct(testing.allocator, .{
         .name = "alice",
         .age = 30,
         .score = 9.5,
@@ -90,35 +102,35 @@ test "fieldsFromStruct basic types" {
 
 test "fieldsFromStruct optional null" {
     const val: ?i32 = null;
-    const fields = fieldsFromStruct(.{ .x = val });
+    const fields = fieldsFromStruct(std.testing.allocator, .{ .x = val });
     try std.testing.expectEqual(Field.Value.null_value, fields[0].value);
 }
 
 test "fieldsFromStruct optional with value" {
     const val: ?i32 = 42;
-    const fields = fieldsFromStruct(.{ .x = val });
+    const fields = fieldsFromStruct(std.testing.allocator, .{ .x = val });
     try std.testing.expectEqual(@as(i64, 42), fields[0].value.int);
 }
 
 test "toValue enum" {
     const Color = enum { red, green, blue };
-    const v = comptime toValue(Color.green);
+    const v = toValue(std.testing.allocator, Color.green);
     try std.testing.expectEqualStrings("green", v.string);
 }
 
 test "toValue error" {
-    const v = comptime toValue(error.OutOfMemory);
+    const v = toValue(std.testing.allocator, error.OutOfMemory);
     try std.testing.expectEqualStrings("OutOfMemory", v.err_name);
 }
 
 test "fieldsFromStruct error field" {
-    const fields = fieldsFromStruct(.{ .err = error.FileNotFound });
+    const fields = fieldsFromStruct(std.testing.allocator, .{ .err = error.FileNotFound });
     try std.testing.expectEqualStrings("err", fields[0].key);
     try std.testing.expectEqualStrings("FileNotFound", fields[0].value.err_name);
 }
 
 test "fieldsFromStruct nested struct becomes group" {
-    const fields = fieldsFromStruct(.{
+    const fields = fieldsFromStruct(std.testing.allocator, .{
         .request = .{ .method = "GET", .url = "/api" },
     });
     try std.testing.expectEqual(1, fields.len);
@@ -132,7 +144,7 @@ test "fieldsFromStruct nested struct becomes group" {
 }
 
 test "fieldsFromStruct deeply nested struct" {
-    const fields = fieldsFromStruct(.{
+    const fields = fieldsFromStruct(std.testing.allocator, .{
         .outer = .{ .inner = .{ .deep = 42 } },
     });
     const outer_group = fields[0].value.group;
@@ -140,4 +152,45 @@ test "fieldsFromStruct deeply nested struct" {
     const inner_group = outer_group[0].value.group;
     try std.testing.expectEqualStrings("deep", inner_group[0].key);
     try std.testing.expectEqual(42, inner_group[0].value.uint);
+}
+
+test "fieldsFromStruct with runtime values" {
+    var runtime_int: i32 = 42;
+    runtime_int += 0; // prevent comptime evaluation
+    var runtime_str: []const u8 = "hello";
+    runtime_str = runtime_str; // prevent comptime evaluation
+
+    const fields = fieldsFromStruct(std.testing.allocator, .{
+        .count = runtime_int,
+        .name = runtime_str,
+    });
+
+    try std.testing.expectEqual(2, fields.len);
+    try std.testing.expectEqualStrings("count", fields[0].key);
+    try std.testing.expectEqual(@as(i64, 42), fields[0].value.int);
+    try std.testing.expectEqualStrings("name", fields[1].key);
+    try std.testing.expectEqualStrings("hello", fields[1].value.string);
+}
+
+test "fieldsFromStruct with runtime optional" {
+    var runtime_val: ?i32 = 42;
+    runtime_val = runtime_val; // prevent comptime evaluation
+
+    const fields = fieldsFromStruct(std.testing.allocator, .{ .x = runtime_val });
+    try std.testing.expectEqual(@as(i64, 42), fields[0].value.int);
+
+    var null_val: ?i32 = null;
+    null_val = null_val;
+    const fields2 = fieldsFromStruct(std.testing.allocator, .{ .x = null_val });
+    try std.testing.expectEqual(Field.Value.null_value, fields2[0].value);
+}
+
+test "fieldsFromStruct with comptime values still works" {
+    const fields = fieldsFromStruct(std.testing.allocator, .{
+        .name = "alice",
+        .age = 30,
+    });
+    try std.testing.expectEqual(2, fields.len);
+    try std.testing.expectEqualStrings("alice", fields[0].value.string);
+    try std.testing.expectEqual(30, fields[1].value.uint);
 }

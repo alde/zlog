@@ -78,7 +78,7 @@ The last argument is always an anonymous struct of fields. Pass `.{}` for no fie
 Child loggers add persistent context without allocating on every log call:
 
 ```zig
-// Comptime fields from a struct
+// Fields from a struct (supports both comptime and runtime values)
 const req_log = logger.with(.{ .request_id = "abc-123" });
 
 // Runtime fields from a slice
