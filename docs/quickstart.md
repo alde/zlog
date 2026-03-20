@@ -5,7 +5,7 @@
 Add zlog as a dependency in `build.zig.zon`:
 
 ```sh
-zig fetch --save https://github.com/alde/zlog/archive/refs/tags/v0.1.0.tar.gz
+zig fetch --save https://github.com/alde/zlog/archive/refs/tags/v0.2.0.tar.gz
 ```
 
 Then in `build.zig`, add it to your module:
