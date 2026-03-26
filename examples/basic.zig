@@ -2,10 +2,9 @@ const std = @import("std");
 const zlog = @import("zlog");
 
 pub fn main() !void {
-    // JSON handler
-    var json_handler = zlog.JsonHandler.init(zlog.stderr);
+    // Quick start — one-liner with initHandler
     const Log = zlog.Logger(.info, .{});
-    var logger = try Log.init(.{ .handler = json_handler.handler(), .allocator = std.heap.page_allocator });
+    var logger = try Log.initHandler(zlog.JsonHandler, .{}, .{ .allocator = std.heap.page_allocator });
     defer logger.deinit();
 
     logger.info("server started", .{ .port = 8080, .env = "prod" });
@@ -35,7 +34,7 @@ pub fn main() !void {
     // Source location — use Logger with .src = true and pass @src() as last argument
     const SrcLog = zlog.Logger(.info, .{ .src = true });
     {
-        var src_log = try SrcLog.init(.{ .handler = json_handler.handler(), .allocator = std.heap.page_allocator });
+        var src_log = try SrcLog.initHandler(zlog.JsonHandler, .{}, .{ .allocator = std.heap.page_allocator });
         defer src_log.deinit();
         src_log.info("checkpoint reached", .{ .step = "init" }, @src());
     }
@@ -56,16 +55,12 @@ pub fn main() !void {
     verbose_log.debug("this appears because of per-logger level override", .{});
 
     // JSON handler with RFC 3339 timestamps — human-readable ISO format
-    const Rfc3339Json = zlog.JsonHandler.Handler(.{ .timestamp = .rfc3339 });
-    var rfc3339_handler = Rfc3339Json.init(zlog.stderr);
-    var rfc3339_logger = try Log.init(.{ .handler = rfc3339_handler.handler(), .allocator = std.heap.page_allocator });
+    var rfc3339_logger = try Log.initHandler(zlog.JsonHandler, .{ .timestamp = .rfc3339 }, .{ .allocator = std.heap.page_allocator });
     defer rfc3339_logger.deinit();
     rfc3339_logger.info("human-readable timestamps", .{ .format = "RFC 3339" });
 
     // Text handler with RFC 3339 timestamps
-    const Rfc3339Text = zlog.TextHandler.Handler(.{ .timestamp = .rfc3339 });
-    var text_handler = Rfc3339Text.init(zlog.stderr);
-    var text_logger = try Log.init(.{ .handler = text_handler.handler(), .allocator = std.heap.page_allocator });
+    var text_logger = try Log.initHandler(zlog.TextHandler, .{ .timestamp = .rfc3339 }, .{ .allocator = std.heap.page_allocator });
     defer text_logger.deinit();
     text_logger.info("server started", .{ .port = 8080, .env = "prod" });
     text_logger.err("connection failed", .{ .host = "db.local", .err = error.TimedOut });
@@ -74,9 +69,7 @@ pub fn main() !void {
     text_logger.info("handled", .{ .request = .{ .method = "GET", .url = "/api" } });
 
     // Color handler with RFC 3339 timestamps — logrus-style colored output for terminals
-    const Rfc3339Color = zlog.ColorHandler.Handler(.{ .timestamp = .rfc3339 });
-    var color_handler = Rfc3339Color.init(zlog.stderr);
-    var color_logger = try Log.init(.{ .handler = color_handler.handler(), .allocator = std.heap.page_allocator });
+    var color_logger = try Log.initHandler(zlog.ColorHandler, .{ .timestamp = .rfc3339 }, .{ .allocator = std.heap.page_allocator });
     defer color_logger.deinit();
     color_logger.info("server started", .{ .port = 8080, .env = "prod" });
     color_logger.warn("slow response", .{ .duration_ms = 1200 });

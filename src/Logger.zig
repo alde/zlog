@@ -62,6 +62,46 @@ pub fn Logger(comptime min_level: Level, comptime opts: Options) type {
             };
         }
 
+        pub const HandlerInitOptions = struct {
+            writer: std.io.AnyWriter = fd.stderr,
+            middlewares: []const Middleware = &.{},
+            allocator: std.mem.Allocator,
+            level: ?*AtomicLevel = null,
+        };
+
+        /// Convenience initializer that creates the handler internally.
+        /// Accepts any handler module (e.g. `zlog.ColorHandler`, `zlog.JsonHandler`)
+        /// and its comptime config. The handler is allocated on the logger's arena
+        /// and freed automatically by `deinit()`.
+        ///
+        /// ```
+        /// var logger = try Log.initHandler(zlog.ColorHandler, .{ .timestamp = .rfc3339 }, .{
+        ///     .allocator = std.heap.page_allocator,
+        /// });
+        /// defer logger.deinit();
+        /// ```
+        pub fn initHandler(
+            comptime HandlerModule: type,
+            comptime handler_config: HandlerModule.Config,
+            init_opts: HandlerInitOptions,
+        ) !Self {
+            const shared = try init_opts.allocator.create(Shared);
+            shared.* = .{
+                .arena = std.heap.ArenaAllocator.init(init_opts.allocator),
+                .backing_allocator = init_opts.allocator,
+            };
+            const ConcreteHandler = HandlerModule.Handler(handler_config);
+            const concrete = try shared.arena.allocator().create(ConcreteHandler);
+            concrete.* = ConcreteHandler.init(init_opts.writer);
+            return .{
+                .handler = concrete.handler(),
+                .middlewares = init_opts.middlewares,
+                .shared = shared,
+                .level = init_opts.level,
+                .is_owner = true,
+            };
+        }
+
         /// Frees all memory owned by this logger and its children.
         /// Only call on the root logger (created via `init`). Never call on child
         /// loggers returned by `with()` or `withGroup()`.
@@ -354,6 +394,46 @@ pub fn Logger(comptime min_level: Level, comptime opts: Options) type {
             return count + 1;
         }
     };
+}
+
+test "initHandler creates logger with arena-owned handler" {
+    const testing = std.testing;
+    const json = @import("handlers/json.zig");
+    const Log = Logger(.info, .{});
+
+    var buf: [1024]u8 = undefined;
+    var fbs = std.io.fixedBufferStream(&buf);
+
+    var logger = try Log.initHandler(json, .{}, .{
+        .writer = fbs.writer().any(),
+        .allocator = testing.allocator,
+    });
+    defer logger.deinit();
+
+    logger.info("hello", .{ .from = "initHandler" });
+    const output = fbs.getWritten();
+    try testing.expect(std.mem.indexOf(u8, output, "\"hello\"") != null);
+    try testing.expect(std.mem.indexOf(u8, output, "\"from\":\"initHandler\"") != null);
+}
+
+test "initHandler with custom config" {
+    const testing = std.testing;
+    const json = @import("handlers/json.zig");
+    const Log = Logger(.debug, .{});
+
+    var buf: [1024]u8 = undefined;
+    var fbs = std.io.fixedBufferStream(&buf);
+
+    var logger = try Log.initHandler(json, .{ .timestamp = .rfc3339 }, .{
+        .writer = fbs.writer().any(),
+        .allocator = testing.allocator,
+    });
+    defer logger.deinit();
+
+    logger.info("test", .{});
+    const output = fbs.getWritten();
+    // RFC 3339 timestamps contain 'T' separator (e.g. 2024-01-01T00:00:00)
+    try testing.expect(std.mem.indexOf(u8, output, "T") != null);
 }
 
 test "logger comptime level filtering" {
